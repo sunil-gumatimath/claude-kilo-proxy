@@ -1,11 +1,11 @@
 {
   "name": "claude-kilo-proxy",
   "version": "1.0.0",
-  "description": "Use Kilo Code models with Claude Code. Local proxy translating Anthropic Messages API ↔ OpenAI Chat Completions for Kilo Gateway (or any OpenAI-compatible API).",
+  "description": "Use Kilo Code models with Claude Code. Production-ready local proxy translating Anthropic Messages API ↔ OpenAI Chat Completions for Kilo Gateway (or any OpenAI-compatible API).",
   "license": "MIT",
   "type": "module",
   "private": false,
-  "author": "SuniL",
+  "author": "TED",
   "keywords": [
     "claude-code",
     "kilo",
@@ -20,7 +20,10 @@
   ],
   "scripts": {
     "start": "bun run src/index.ts",
-    "dev": "bun --watch src/index.ts"
+    "dev": "bun --watch src/index.ts",
+    "test": "bun test",
+    "test:watch": "bun test --watch",
+    "typecheck": "bunx tsc --noEmit"
   },
   "engines": {
     "bun": ">=1.0.0"
@@ -29,6 +32,11 @@
     "src",
     "LICENSE",
     "README.md",
-    ".env.example"
-  ]
+    ".env.example",
+    "Dockerfile"
+  ],
+  "devDependencies": {
+    "bun-types": "latest",
+    "typescript": "^5.7.0"
+  }
 }

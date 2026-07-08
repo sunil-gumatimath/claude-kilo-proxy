@@ -6,7 +6,7 @@
 
 **Use [Kilo Code](https://kilo.ai) models with [Claude Code](https://docs.anthropic.com/en/docs/claude-code).**
 
-A lightweight local proxy that translates between the **Anthropic Messages API** and **OpenAI Chat Completions** so Claude Code CLI can talk to Kilo Gateway (or any OpenAI-compatible API).
+Production-oriented local proxy that translates **Anthropic Messages API** ↔ **OpenAI Chat Completions** so Claude Code can use Kilo Gateway (or any OpenAI-compatible API).
 
 ```
 Claude Code CLI  ──(Anthropic format)──▶  claude-kilo-proxy  ──(OpenAI format)──▶  Kilo Gateway
@@ -15,25 +15,19 @@ Claude Code CLI  ──(Anthropic format)──▶  claude-kilo-proxy  ──(Op
 
 > **Disclaimer:** Unofficial community project. Not affiliated with, endorsed by, or sponsored by Anthropic or Kilo. APIs may change; use at your own risk.
 
-## Why?
-
-| Provider | Anthropic API (`/v1/messages`) | OpenAI API (`/chat/completions`) |
-|---|---|---|
-| OpenRouter | ✅ | ✅ |
-| **Kilo Gateway** | **❌** | **✅** |
-
-Claude Code speaks Anthropic format. Kilo speaks OpenAI format. This proxy bridges them.
-
 ## Features
 
 - Full request/response translation (Anthropic ↔ OpenAI)
-- Streaming (SSE) with real-time chunk translation
-- Tool use / function calling support
+- Streaming (SSE) with reliable stream finalization
+- Tool use / function calling (including multi-turn tool results)
 - Image content support
-- Multi-turn conversations with tool results
-- Zero npm dependencies — just [Bun](https://bun.sh)
-- Colored logging with debug mode
-- Works with any OpenAI-compatible gateway
+- Upstream timeouts, body size limits, request IDs
+- Localhost-only bind by default
+- Graceful shutdown (SIGINT / SIGTERM)
+- Debug logging with secret/base64 redaction
+- Zero runtime npm dependencies — [Bun](https://bun.sh) only
+- Docker image included
+- Unit tests for the translator
 
 ## Requirements
 
@@ -55,7 +49,7 @@ cp .env.example .env
 
 ```bash
 bun run start
-# or with hot reload:
+# hot reload:
 bun run dev
 ```
 
@@ -77,68 +71,107 @@ export ANTHROPIC_AUTH_TOKEN="your-kilo-api-key"
 export ANTHROPIC_API_KEY=""
 ```
 
-Then:
-
 ```bash
 claude /logout
 claude
 ```
 
-You can also leave `KILO_API_KEY` empty in `.env` and pass the key only via `ANTHROPIC_AUTH_TOKEN` / `x-api-key` — the proxy forwards it to Kilo.
+You can leave `KILO_API_KEY` empty and pass the key only via `ANTHROPIC_AUTH_TOKEN` / `x-api-key`.
 
 ## Configuration
 
 | Env Variable | Default | Description |
 |---|---|---|
-| `KILO_API_KEY` | *(optional if sent in request)* | Your Kilo Code API key |
+| `KILO_API_KEY` | *(optional if sent on request)* | Upstream API key |
 | `KILO_BASE_URL` | `https://api.kilo.ai/api/gateway` | Upstream base URL |
-| `PROXY_PORT` | `4181` | Local port for the proxy |
-| `MODEL_PREFIX` | `anthropic/` | Prefix added to model names for the gateway |
-| `DEBUG` | `false` | Verbose request/response logging |
+| `PROXY_HOST` | `127.0.0.1` | Bind address (localhost-only by default) |
+| `PROXY_PORT` | `4181` | Listen port |
+| `MODEL_PREFIX` | `anthropic/` | Prefix added to model names |
+| `DEFAULT_MODEL` | `claude-sonnet-4-20250514` | Fallback when request omits `model` |
+| `UPSTREAM_TIMEOUT_MS` | `120000` | Upstream request timeout |
+| `MAX_BODY_BYTES` | `20971520` (20MB) | Max request body size |
+| `DEBUG` | `false` | Verbose logging (redacted) |
 
-## How It Works
+## Project structure
 
-### Request translation (Anthropic → OpenAI)
+```
+src/
+  index.ts              # Entry
+  config.ts             # Env config
+  server.ts             # HTTP routing + lifecycle
+  auth.ts               # API key extraction
+  errors.ts             # Anthropic-shaped errors
+  log.ts                # Logging + redaction
+  types.ts              # Shared types
+  version.ts            # Package version
+  translate.ts          # Anthropic ↔ OpenAI core
+  handlers/
+    messages.ts         # POST /v1/messages
+tests/
+  translate.test.ts
+Dockerfile
+```
 
-- `system` (top-level) → `messages[0].role: "system"`
-- `messages[].content[].type: "tool_use"` → `tool_calls[]`
-- `messages[].content[].type: "tool_result"` → `role: "tool"` messages
-- `tools[].input_schema` → `tools[].function.parameters`
-- `stop_sequences` → `stop`
-- Model name gets prefixed (e.g. `claude-sonnet-4-20250514` → `anthropic/claude-sonnet-4-20250514`)
+## Docker
 
-### Response translation (streaming)
+```bash
+docker build -t claude-kilo-proxy .
+docker run --rm -p 4181:4181 \
+  -e KILO_API_KEY=your-key \
+  claude-kilo-proxy
+```
 
-- OpenAI `data: {...}` chunks → Anthropic SSE events (`message_start`, `content_block_start`, `content_block_delta`, `content_block_stop`, `message_delta`, `message_stop`)
-- `finish_reason: "stop"` → `stop_reason: "end_turn"`
-- `finish_reason: "tool_calls"` → `stop_reason: "tool_use"`
-- `delta.tool_calls[]` → `content_block` with `type: "tool_use"` + `input_json_delta`
+> Container sets `PROXY_HOST=0.0.0.0` so port publishing works. Keep the host firewall tight.
 
 ## Other OpenAI-compatible gateways
 
-Change `KILO_BASE_URL` (and usually clear the model prefix):
+```bash
+KILO_BASE_URL=http://localhost:11434/v1 MODEL_PREFIX="" bun run start
+```
+
+## Health & version
 
 ```bash
-# Local Ollama example
-KILO_BASE_URL=http://localhost:11434/v1 MODEL_PREFIX="" bun run start
+curl http://localhost:4181/health
+curl http://localhost:4181/version
+```
+
+## Development
+
+```bash
+bun install          # devDependencies (types, typescript)
+bun test             # unit tests
+bun run typecheck    # tsc --noEmit
+bun run dev          # hot reload
 ```
 
 ## Security
 
-- Intended for **local** use. Do not expose the proxy port to the public internet without additional authentication.
-- Never commit `.env` — it is gitignored. Only `.env.example` is in the repo.
-- `DEBUG=true` can log full request bodies (prompts). Avoid that on shared machines.
+- Default bind is **localhost only** (`PROXY_HOST=127.0.0.1`).
+- Do not expose the port to the public internet without additional auth.
+- Never commit `.env`.
+- See [SECURITY.md](./SECURITY.md).
 
-## Health check
+## How it works
 
-```bash
-curl http://localhost:4181/health
-```
+### Request (Anthropic → OpenAI)
+
+- `system` → `messages[0].role: "system"`
+- `tool_use` → `tool_calls[]`
+- `tool_result` → `role: "tool"`
+- `tools[].input_schema` → `tools[].function.parameters`
+- Model prefixed for gateway routing
+
+### Streaming (OpenAI → Anthropic SSE)
+
+- Chunks → `message_start` / `content_block_*` / `message_delta` / `message_stop`
+- `finish_reason: tool_calls` → `stop_reason: tool_use`
+- Stream always finalized if upstream closes early
 
 ## Contributing
 
-Issues and PRs are welcome. See [CONTRIBUTING.md](./CONTRIBUTING.md).
+See [CONTRIBUTING.md](./CONTRIBUTING.md).
 
 ## License
 
-[MIT](./LICENSE) © SuniL
+[MIT](./LICENSE) © TED

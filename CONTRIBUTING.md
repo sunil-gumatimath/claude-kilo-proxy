@@ -6,25 +6,36 @@ Thanks for helping improve **claude-kilo-proxy**.
 
 ```bash
 cp .env.example .env   # set KILO_API_KEY if you need live calls
+bun install
 bun run dev            # hot reload
+bun test               # unit tests
+bun run typecheck
 ```
 
-- Runtime: [Bun](https://bun.sh)
-- Core logic: `src/translate.ts` (Anthropic ↔ OpenAI)
-- Server: `src/index.ts`
+### Layout
+
+| Path | Role |
+|------|------|
+| `src/translate.ts` | Anthropic ↔ OpenAI protocol |
+| `src/handlers/messages.ts` | `/v1/messages` handler |
+| `src/server.ts` | Routing, health, shutdown |
+| `src/config.ts` | Environment config |
+| `tests/` | Unit tests |
 
 ## Guidelines
 
-1. **Keep it small** — zero runtime npm dependencies preferred.
-2. **Match Anthropic/OpenAI shapes** carefully; Claude Code is picky about SSE event order.
-3. **Don’t commit secrets** — `.env` is ignored; use `.env.example` for new vars.
-4. **Describe the change** — what broke, how you fixed it, how you tested.
+1. **Keep runtime deps at zero** when possible (Bun built-ins only).
+2. **Match Anthropic/OpenAI shapes** carefully — Claude Code is picky about SSE order.
+3. **Don’t commit secrets** — `.env` is ignored; document new vars in `.env.example` and README.
+4. **Add tests** for translator changes.
+5. **Describe the change** — what broke, how you fixed it, how you tested.
 
 ## Pull requests
 
 1. Fork and branch from `main`
-2. Make a focused change
-3. Open a PR with a short summary and test notes
+2. Keep the PR focused
+3. Ensure `bun test` passes
+4. Summarize impact (streaming / tools / config)
 
 ## Reporting bugs
 
@@ -32,9 +43,9 @@ Include:
 
 - Bun version (`bun --version`)
 - OS
-- Relevant env (port, `MODEL_PREFIX`, gateway URL — **redact API keys**)
-- Proxy logs (with `DEBUG=true` if useful, redacted)
-- Whether the issue is sync vs streaming, and if tools were involved
+- Relevant env (port, prefix, gateway URL — **redact keys**)
+- Logs (`DEBUG=true` if useful, redacted)
+- Sync vs streaming, tools involved or not
 
 ## Code of conduct
 

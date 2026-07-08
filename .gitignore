@@ -5,8 +5,7 @@
 
 # Dependencies
 node_modules/
-
-# Bun
+# Keep bun.lock committed for reproducible installs; ignore only local lockb if present
 bun.lockb
 
 # Build / cache

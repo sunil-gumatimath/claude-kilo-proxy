@@ -2,62 +2,73 @@
 // translate.ts — Anthropic Messages API ↔ OpenAI Chat Completions translator
 // ============================================================================
 
+import type {
+  AnthropicContentBlock,
+  AnthropicMessageResponse,
+  AnthropicMessagesRequest,
+  OpenAIChatRequest,
+  OpenAIChatResponse,
+  OpenAIMessage,
+} from "./types";
+
 // ─── Request Translation (Anthropic → OpenAI) ──────────────────────────────
 
-export function translateRequest(body: any, modelPrefix: string): any {
-  const openai: any = {};
+export function translateRequest(
+  body: AnthropicMessagesRequest,
+  modelPrefix: string,
+  defaultModel = "claude-sonnet-4-20250514"
+): OpenAIChatRequest {
+  const openai: OpenAIChatRequest = {
+    model: "",
+    messages: [],
+  };
 
-  // Model — add prefix for gateway routing (e.g. "anthropic/claude-sonnet-4-20250514")
-  const model = body.model || "claude-sonnet-4-20250514";
-  openai.model = model.startsWith(modelPrefix) ? model : modelPrefix + model;
+  const model = body.model || defaultModel;
+  openai.model =
+    modelPrefix && model.startsWith(modelPrefix)
+      ? model
+      : modelPrefix + model;
 
-  // ── Messages ──
-  const messages: any[] = [];
+  const messages: OpenAIMessage[] = [];
 
-  // System prompt → system message (first in array)
   if (body.system) {
     if (typeof body.system === "string") {
       messages.push({ role: "system", content: body.system });
     } else if (Array.isArray(body.system)) {
       const text = body.system
-        .filter((b: any) => b.type === "text")
-        .map((b: any) => b.text)
+        .filter((b) => b.type === "text")
+        .map((b) => b.text)
         .join("\n");
       if (text) messages.push({ role: "system", content: text });
     }
   }
 
-  // Translate each message
   for (const msg of body.messages || []) {
     messages.push(...translateMessage(msg));
   }
   openai.messages = messages;
 
-  // ── Parameters ──
   if (body.max_tokens != null) openai.max_tokens = body.max_tokens;
   if (body.temperature != null) openai.temperature = body.temperature;
   if (body.top_p != null) openai.top_p = body.top_p;
   if (body.stop_sequences) openai.stop = body.stop_sequences;
   if (body.stream != null) openai.stream = body.stream;
 
-  // Request usage stats in streaming mode
   if (body.stream) {
     openai.stream_options = { include_usage: true };
   }
 
-  // ── Tools ──
   if (body.tools?.length) {
-    openai.tools = body.tools.map((t: any) => ({
+    openai.tools = body.tools.map((t) => ({
       type: "function",
       function: {
         name: t.name,
         description: t.description || "",
-        parameters: t.input_schema || { type: "object" },
+        parameters: t.input_schema || { type: "object", properties: {} },
       },
     }));
   }
 
-  // ── Tool Choice ──
   if (body.tool_choice) {
     if (body.tool_choice.type === "auto") {
       openai.tool_choice = "auto";
@@ -76,10 +87,12 @@ export function translateRequest(body: any, modelPrefix: string): any {
   return openai;
 }
 
-function translateMessage(msg: any): any[] {
+function translateMessage(msg: {
+  role: string;
+  content: string | AnthropicContentBlock[];
+}): OpenAIMessage[] {
   const role = msg.role;
 
-  // Simple string content — pass through
   if (typeof msg.content === "string") {
     return [{ role, content: msg.content }];
   }
@@ -91,71 +104,75 @@ function translateMessage(msg: any): any[] {
   if (role === "assistant") return translateAssistantMessage(msg.content);
   if (role === "user") return translateUserMessage(msg.content);
 
-  // Fallback: extract text
   const text = msg.content
-    .filter((b: any) => b.type === "text")
-    .map((b: any) => b.text)
+    .filter((b) => b.type === "text")
+    .map((b) => ("text" in b ? String(b.text) : ""))
     .join("\n");
   return [{ role, content: text || "" }];
 }
 
-function translateAssistantMessage(blocks: any[]): any[] {
+function translateAssistantMessage(
+  blocks: AnthropicContentBlock[]
+): OpenAIMessage[] {
   const textParts: string[] = [];
-  const toolCalls: any[] = [];
+  const toolCalls: NonNullable<OpenAIMessage["tool_calls"]> = [];
 
   for (const block of blocks) {
-    if (block.type === "text") {
-      textParts.push(block.text);
-    } else if (block.type === "tool_use") {
+    if (block.type === "text" && "text" in block) {
+      textParts.push(String(block.text));
+    } else if (block.type === "tool_use" && "id" in block && "name" in block) {
+      const input = "input" in block ? block.input : {};
       toolCalls.push({
-        id: block.id,
+        id: String(block.id),
         type: "function",
         function: {
-          name: block.name,
+          name: String(block.name),
           arguments:
-            typeof block.input === "string"
-              ? block.input
-              : JSON.stringify(block.input || {}),
+            typeof input === "string" ? input : JSON.stringify(input ?? {}),
         },
       });
     }
-    // "thinking" blocks are skipped — no OpenAI equivalent
+    // "thinking" blocks — no OpenAI equivalent; skipped intentionally
   }
 
-  const msg: any = {
+  const out: OpenAIMessage = {
     role: "assistant",
     content: textParts.join("\n") || null,
   };
-  if (toolCalls.length) msg.tool_calls = toolCalls;
-
-  return [msg];
+  if (toolCalls.length) out.tool_calls = toolCalls;
+  return [out];
 }
 
-function translateUserMessage(blocks: any[]): any[] {
-  const result: any[] = [];
-  const contentParts: any[] = [];
+function translateUserMessage(
+  blocks: AnthropicContentBlock[]
+): OpenAIMessage[] {
+  const result: OpenAIMessage[] = [];
+  const contentParts: unknown[] = [];
 
   for (const block of blocks) {
-    if (block.type === "text") {
+    if (block.type === "text" && "text" in block) {
       contentParts.push({ type: "text", text: block.text });
-    } else if (block.type === "image") {
-      // Anthropic image → OpenAI image_url
-      if (block.source?.type === "base64") {
+    } else if (block.type === "image" && "source" in block) {
+      const source = block.source as {
+        type?: string;
+        media_type?: string;
+        data?: string;
+        url?: string;
+      };
+      if (source?.type === "base64" && source.media_type && source.data) {
         contentParts.push({
           type: "image_url",
           image_url: {
-            url: `data:${block.source.media_type};base64,${block.source.data}`,
+            url: `data:${source.media_type};base64,${source.data}`,
           },
         });
-      } else if (block.source?.type === "url") {
+      } else if (source?.type === "url" && source.url) {
         contentParts.push({
           type: "image_url",
-          image_url: { url: block.source.url },
+          image_url: { url: source.url },
         });
       }
-    } else if (block.type === "tool_result") {
-      // Tool results must become separate role:"tool" messages in OpenAI format
-      // Flush any accumulated content first
+    } else if (block.type === "tool_result" && "tool_use_id" in block) {
       if (contentParts.length) {
         result.push({
           role: "user",
@@ -165,24 +182,29 @@ function translateUserMessage(blocks: any[]): any[] {
       }
 
       let toolContent = "";
-      if (typeof block.content === "string") {
-        toolContent = block.content;
-      } else if (Array.isArray(block.content)) {
-        toolContent = block.content
-          .filter((b: any) => b.type === "text")
-          .map((b: any) => b.text)
+      const content = "content" in block ? block.content : undefined;
+      if (typeof content === "string") {
+        toolContent = content;
+      } else if (Array.isArray(content)) {
+        toolContent = content
+          .filter((b) => b && typeof b === "object" && "type" in b && b.type === "text")
+          .map((b) => ("text" in b ? String(b.text) : ""))
           .join("\n");
       }
 
-      result.push({
+      const toolMsg: OpenAIMessage = {
         role: "tool",
-        tool_call_id: block.tool_use_id,
+        tool_call_id: String(block.tool_use_id),
         content: toolContent || "",
-      });
+      };
+      // Some gateways accept this for failed tools
+      if ("is_error" in block && block.is_error) {
+        (toolMsg as OpenAIMessage & { is_error?: boolean }).is_error = true;
+      }
+      result.push(toolMsg);
     }
   }
 
-  // Flush remaining content parts
   if (contentParts.length) {
     result.push({ role: "user", content: simplifyContent(contentParts) });
   }
@@ -190,15 +212,24 @@ function translateUserMessage(blocks: any[]): any[] {
   return result.length ? result : [{ role: "user", content: "" }];
 }
 
-/** If content is a single text part, simplify to a plain string */
-function simplifyContent(parts: any[]): string | any[] {
-  if (parts.length === 1 && parts[0].type === "text") return parts[0].text;
+function simplifyContent(parts: unknown[]): string | unknown[] {
+  if (
+    parts.length === 1 &&
+    parts[0] &&
+    typeof parts[0] === "object" &&
+    (parts[0] as { type?: string }).type === "text"
+  ) {
+    return String((parts[0] as { text: string }).text);
+  }
   return parts;
 }
 
 // ─── Response Translation (OpenAI → Anthropic) — Non-Streaming ─────────────
 
-export function translateResponse(openai: any, originalModel: string): any {
+export function translateResponse(
+  openai: OpenAIChatResponse,
+  originalModel: string
+): AnthropicMessageResponse {
   const choice = openai.choices?.[0];
 
   if (!choice) {
@@ -214,19 +245,19 @@ export function translateResponse(openai: any, originalModel: string): any {
     };
   }
 
-  const content: any[] = [];
+  const content: AnthropicContentBlock[] = [];
 
   if (choice.message?.content) {
-    content.push({ type: "text", text: choice.message.content });
+    content.push({ type: "text", text: String(choice.message.content) });
   }
 
   if (choice.message?.tool_calls) {
     for (const tc of choice.message.tool_calls) {
-      let input = {};
+      let input: unknown = {};
       try {
-        input = JSON.parse(tc.function.arguments);
+        input = JSON.parse(tc.function.arguments || "{}");
       } catch {
-        /* keep empty */
+        input = { raw: tc.function.arguments };
       }
       content.push({
         type: "tool_use",
@@ -240,12 +271,12 @@ export function translateResponse(openai: any, originalModel: string): any {
   if (!content.length) content.push({ type: "text", text: "" });
 
   return {
-    id: `msg_${uid()}`,
+    id: openai.id ? `msg_${openai.id.replace(/^chatcmpl-/, "")}` : `msg_${uid()}`,
     type: "message",
     role: "assistant",
     content,
     model: originalModel,
-    stop_reason: mapFinishReason(choice.finish_reason),
+    stop_reason: mapFinishReason(choice.finish_reason ?? null),
     stop_sequence: null,
     usage: {
       input_tokens: openai.usage?.prompt_tokens || 0,
@@ -263,8 +294,11 @@ export class StreamTranslator {
   private textBlockActive = false;
   private textBlockIdx = -1;
   private nextBlockIdx = 0;
-  /** Map: OpenAI tool_call index → Anthropic content block index */
-  private toolMap = new Map<number, { blockIdx: number; id: string }>();
+  /** OpenAI tool_call index → Anthropic content block index */
+  private toolMap = new Map<
+    number,
+    { blockIdx: number; id: string; name: string; pendingArgs: string }
+  >();
   private inputTokens = 0;
   private outputTokens = 0;
   private finished = false;
@@ -274,14 +308,34 @@ export class StreamTranslator {
     this.model = model;
   }
 
+  get isFinished(): boolean {
+    return this.finished;
+  }
+
   /**
    * Process one SSE data payload from the OpenAI stream.
-   * Returns an array of Anthropic SSE event strings ready to be written.
+   * Returns Anthropic SSE event strings ready to write.
    */
   processChunk(data: string): string[] {
-    if (data === "[DONE]") return [];
+    if (data === "[DONE]") {
+      return this.finalize("stop");
+    }
 
-    let chunk: any;
+    let chunk: OpenAIChatResponse & {
+      choices?: Array<{
+        delta?: {
+          content?: string | null;
+          tool_calls?: Array<{
+            index?: number;
+            id?: string;
+            function?: { name?: string; arguments?: string };
+          }>;
+        };
+        finish_reason?: string | null;
+      }>;
+      usage?: { prompt_tokens?: number; completion_tokens?: number };
+    };
+
     try {
       chunk = JSON.parse(data);
     } catch {
@@ -290,7 +344,6 @@ export class StreamTranslator {
 
     const events: string[] = [];
 
-    // ── Emit message_start on the very first chunk ──
     if (!this.started) {
       events.push(
         sse("message_start", {
@@ -311,7 +364,6 @@ export class StreamTranslator {
       this.started = true;
     }
 
-    // Track usage (may arrive in any chunk or a dedicated usage-only chunk)
     if (chunk.usage) {
       this.inputTokens = chunk.usage.prompt_tokens ?? this.inputTokens;
       this.outputTokens = chunk.usage.completion_tokens ?? this.outputTokens;
@@ -322,7 +374,6 @@ export class StreamTranslator {
 
     const delta = choice.delta || {};
 
-    // ── Text content ──
     if (delta.content != null && delta.content !== "") {
       if (!this.textBlockActive) {
         this.textBlockIdx = this.nextBlockIdx++;
@@ -344,9 +395,7 @@ export class StreamTranslator {
       );
     }
 
-    // ── Tool calls ──
     if (delta.tool_calls) {
-      // Close text block first (tools come after text in Anthropic format)
       if (this.textBlockActive) {
         events.push(
           sse("content_block_stop", {
@@ -359,57 +408,88 @@ export class StreamTranslator {
 
       for (const tc of delta.tool_calls) {
         const tcIdx = tc.index ?? 0;
+        let entry = this.toolMap.get(tcIdx);
 
-        // New tool call — emit content_block_start
-        if (tc.id && !this.toolMap.has(tcIdx)) {
+        // Open block when we first see this index (id may arrive later)
+        if (!entry) {
+          const id = tc.id || `toolu_${uid()}`;
+          const name = tc.function?.name || "";
           const blockIdx = this.nextBlockIdx++;
-          this.toolMap.set(tcIdx, { blockIdx, id: tc.id });
+          entry = { blockIdx, id, name, pendingArgs: "" };
+          this.toolMap.set(tcIdx, entry);
           events.push(
             sse("content_block_start", {
               type: "content_block_start",
               index: blockIdx,
               content_block: {
                 type: "tool_use",
-                id: tc.id,
-                name: tc.function?.name || "",
+                id,
+                name,
                 input: {},
               },
             })
           );
+        } else {
+          if (tc.id) entry.id = tc.id;
+          if (tc.function?.name) entry.name = tc.function.name;
         }
 
-        // Argument delta → input_json_delta
         if (tc.function?.arguments) {
-          const entry = this.toolMap.get(tcIdx);
-          if (entry) {
-            events.push(
-              sse("content_block_delta", {
-                type: "content_block_delta",
-                index: entry.blockIdx,
-                delta: {
-                  type: "input_json_delta",
-                  partial_json: tc.function.arguments,
-                },
-              })
-            );
-          }
+          events.push(
+            sse("content_block_delta", {
+              type: "content_block_delta",
+              index: entry.blockIdx,
+              delta: {
+                type: "input_json_delta",
+                partial_json: tc.function.arguments,
+              },
+            })
+          );
         }
       }
     }
 
-    // ── Finish ──
     if (choice.finish_reason && !this.finished) {
-      this.finished = true;
       events.push(...this.emitFinish(choice.finish_reason));
     }
 
     return events;
   }
 
+  /**
+   * Ensure stream always ends with Anthropic close events
+   * (e.g. upstream closed without finish_reason).
+   */
+  finalize(reason = "stop"): string[] {
+    if (this.finished) return [];
+    if (!this.started) {
+      // Empty stream — still emit a minimal valid message
+      this.started = true;
+      return [
+        sse("message_start", {
+          type: "message_start",
+          message: {
+            id: this.msgId,
+            type: "message",
+            role: "assistant",
+            content: [],
+            model: this.model,
+            stop_reason: null,
+            stop_sequence: null,
+            usage: { input_tokens: 0, output_tokens: 0 },
+          },
+        }),
+        ...this.emitFinish(reason),
+      ];
+    }
+    return this.emitFinish(reason);
+  }
+
   private emitFinish(finishReason: string): string[] {
+    if (this.finished) return [];
+    this.finished = true;
     const events: string[] = [];
 
-    // Close any open text block
     if (this.textBlockActive) {
       events.push(
         sse("content_block_stop", {
@@ -420,7 +500,6 @@ export class StreamTranslator {
       this.textBlockActive = false;
     }
 
-    // Close all open tool blocks
     for (const [, entry] of this.toolMap) {
       events.push(
         sse("content_block_stop", {
@@ -430,7 +509,6 @@ export class StreamTranslator {
       );
     }
 
-    // If no blocks were ever opened, emit an empty text block
     if (this.nextBlockIdx === 0) {
       events.push(
         sse("content_block_start", {
@@ -452,7 +530,10 @@ export class StreamTranslator {
           stop_reason: mapFinishReason(finishReason),
           stop_sequence: null,
         },
-        usage: { output_tokens: this.outputTokens },
+        usage: {
+          output_tokens: this.outputTokens,
+          input_tokens: this.inputTokens,
+        },
       }),
       sse("message_stop", { type: "message_stop" })
     );
@@ -478,13 +559,17 @@ function mapFinishReason(reason: string | null): string {
   }
 }
 
-function sse(event: string, data: any): string {
+function sse(event: string, data: unknown): string {
   return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 }
 
 export function uid(): string {
-  return (
-    Math.random().toString(36).slice(2, 10) +
-    Math.random().toString(36).slice(2, 10)
-  );
+  try {
+    return crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+  } catch {
+    return (
+      Math.random().toString(36).slice(2, 10) +
+      Math.random().toString(36).slice(2, 10)
+    );
+  }
 }
