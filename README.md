@@ -34,6 +34,8 @@ Claude Code CLI  ──(Anthropic format)──▶  claude-kilo-proxy  ──(Op
 - [Bun](https://bun.sh) ≥ 1.0
 - A [Kilo](https://kilo.ai) API key (or another OpenAI-compatible endpoint)
 
+> **Full walkthrough:** see **[SETUP.md](./SETUP.md)** (install Bun, `.env`, Claude Code env vars, Docker, troubleshooting).
+
 ## Quick Start
 
 ### 1. Clone & configure
