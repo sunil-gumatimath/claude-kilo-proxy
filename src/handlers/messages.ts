@@ -258,14 +258,35 @@ function handleStream(
 
   // Bun's Response body reader has extra methods beyond the web-standard type.
   let reader: any;
+  let canceled = false;
+
+  const safeEnqueue = (controller: ReadableStreamDefaultController, data: Uint8Array) => {
+    if (canceled) return;
+    try {
+      controller.enqueue(data);
+    } catch (e) {
+      canceled = true;
+    }
+  };
+
+  const safeClose = (controller: ReadableStreamDefaultController) => {
+    if (canceled) return;
+    canceled = true;
+    try {
+      controller.close();
+    } catch (e) {
+      // ignore
+    }
+  };
+
   const readable = new ReadableStream({
     async start(controller) {
       reader = kiloRes.body?.getReader();
       if (!reader) {
         for (const ev of translator.finalize("stop")) {
-          controller.enqueue(encoder.encode(ev));
+          safeEnqueue(controller, encoder.encode(ev));
         }
-        controller.close();
+        safeClose(controller);
         cleanup();
         return;
       }
@@ -274,15 +295,16 @@ function handleStream(
       let buffer = "";
 
       try {
-        while (true) {
+        while (!canceled) {
           const { done, value } = await reader.read();
-          if (done) break;
+          if (done || canceled) break;
 
           buffer += decoder.decode(value, { stream: true });
           const lines = buffer.split("\n");
           buffer = lines.pop() || "";
 
           for (const line of lines) {
+            if (canceled) break;
             const trimmed = line.trim();
             if (!trimmed || trimmed.startsWith(":")) continue;
 
@@ -292,50 +314,48 @@ function handleStream(
                 : trimmed.slice(5).trimStart();
               const events = translator.processChunk(data);
               for (const ev of events) {
-                controller.enqueue(encoder.encode(ev));
+                safeEnqueue(controller, encoder.encode(ev));
               }
             }
           }
         }
 
-        if (buffer.trim().startsWith("data:")) {
+        if (!canceled && buffer.trim().startsWith("data:")) {
           const trimmed = buffer.trim();
           const data = trimmed.startsWith("data: ")
             ? trimmed.slice(6)
             : trimmed.slice(5).trimStart();
           for (const ev of translator.processChunk(data)) {
-            controller.enqueue(encoder.encode(ev));
+            safeEnqueue(controller, encoder.encode(ev));
           }
         }
 
         // Always close Anthropic stream cleanly
-        for (const ev of translator.finalize("stop")) {
-          controller.enqueue(encoder.encode(ev));
+        if (!canceled) {
+          for (const ev of translator.finalize("stop")) {
+            safeEnqueue(controller, encoder.encode(ev));
+          }
         }
 
         const elapsed = (performance.now() - startTime).toFixed(0);
         log(
           `${green("←")} stream ${dim(model)} complete ${dim(elapsed + "ms")} ${dim(requestId)}`
         );
-        controller.close();
+        safeClose(controller);
       } catch (err) {
+        if (canceled) return;
         const msg = err instanceof Error ? err.message : String(err);
-        error(`Stream error: ${msg}`);
-        try {
-          controller.enqueue(
-            encoder.encode(anthropicErrorSse("api_error", msg))
-          );
-          for (const ev of translator.finalize("stop")) {
-            controller.enqueue(encoder.encode(ev));
-          }
-        } catch {
-          /* controller may already be closed */
+        if (!msg.includes("Controller is already closed")) {
+          error(`Stream error: ${msg}`);
         }
-        try {
-          controller.close();
-        } catch {
-          /* ignore */
+        safeEnqueue(
+          controller,
+          encoder.encode(anthropicErrorSse("api_error", msg))
+        );
+        for (const ev of translator.finalize("stop")) {
+          safeEnqueue(controller, encoder.encode(ev));
         }
+        safeClose(controller);
       } finally {
         try {
           reader?.releaseLock();
@@ -346,6 +366,7 @@ function handleStream(
       }
     },
     async cancel() {
+      canceled = true;
       upstreamController.abort("Client stopped reading stream");
       try {
         await reader?.cancel();
