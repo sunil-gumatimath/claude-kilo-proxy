@@ -93,7 +93,7 @@ key in `KILO_API_KEY`.
 | `PROXY_PORT` | `4181` | Listen port |
 | `MODEL_PREFIX` | *(empty)* | Optional prefix added to model names |
 | `DEFAULT_MODEL` | `claude-sonnet-4-20250514` | Fallback when request omits `model` |
-| `FALLBACK_MODELS` | `inclusionai/ring-2.6-1t:free,nex-agi/nex-n2-pro:free` | Models tried after 429/5xx failures |
+| `FALLBACK_MODELS` | `nex-agi/nex-n2-pro:free,poolside/laguna-m.1:free` | Models tried after 429/5xx failures |
 | `MODEL_ALIASES` | Claude aliases to free Kilo models | Comma-separated `pattern=model` rules; `*` supported |
 | `SMART_ROUTING` | `true` | Routes Claude image requests to a vision-capable free model |
 | `MAX_CONCURRENT_REQUESTS` | `4` | Active upstream-generation limit |
@@ -174,6 +174,7 @@ bun run dev          # hot reload
 - `tool_use` → `tool_calls[]`
 - `tool_result` → `role: "tool"`
 - `tools[].input_schema` → `tools[].function.parameters`
+- `thinking.budget_tokens` → `reasoning_effort` (high/medium/low)
 - Model prefixed for gateway routing
 
 ### Streaming (OpenAI → Anthropic SSE)
