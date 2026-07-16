@@ -81,7 +81,7 @@ KILO_API_KEY=your-real-kilo-api-key-here
 | `PROXY_PORT` | `4181` | Port already in use |
 | `PROXY_HOST` | `127.0.0.1` | Only for Docker / LAN (see security) |
 | `KILO_BASE_URL` | Kilo gateway URL | Other OpenAI-compatible APIs |
-| `MODEL_PREFIX` | `anthropic/` | Empty string for Ollama, etc. |
+| `MODEL_PREFIX` | *(empty)* | Add only when your gateway requires a model prefix |
 | `DEBUG` | `false` | `true` when troubleshooting |
 
 > **Never commit `.env`.** It is gitignored. Only share `.env.example`.
@@ -138,7 +138,7 @@ Claude Code must send requests to the **proxy**, not to Anthropic.
 
 ```powershell
 $env:ANTHROPIC_BASE_URL = "http://localhost:4181"
-$env:ANTHROPIC_AUTH_TOKEN = "your-kilo-api-key"
+$env:ANTHROPIC_AUTH_TOKEN = "your-kilo-api-key" # or PROXY_API_KEY when configured
 $env:ANTHROPIC_API_KEY = ""
 ```
 
@@ -146,7 +146,7 @@ $env:ANTHROPIC_API_KEY = ""
 
 ```bash
 export ANTHROPIC_BASE_URL="http://localhost:4181"
-export ANTHROPIC_AUTH_TOKEN="your-kilo-api-key"
+export ANTHROPIC_AUTH_TOKEN="your-kilo-api-key" # or PROXY_API_KEY when configured
 export ANTHROPIC_API_KEY=""
 ```
 
@@ -185,7 +185,9 @@ claude
 
 ### Auth notes
 
-- `ANTHROPIC_AUTH_TOKEN` is what Claude Code sends to the proxy.
+- `ANTHROPIC_AUTH_TOKEN` is what Claude Code sends to the proxy. If you set
+  `PROXY_API_KEY`, it must contain that proxy key; keep the upstream Kilo key in
+  `KILO_API_KEY` instead.
 - If `KILO_API_KEY` is set in `.env`, the proxy can use that and still accept header keys.
 - Clear `ANTHROPIC_API_KEY` so Claude Code does not call real Anthropic by mistake.
 
