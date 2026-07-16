@@ -6,6 +6,7 @@ import type { Config } from "../config";
 import { extractApiKey } from "../auth";
 import { anthropicError, anthropicErrorSse, mapUpstreamErrorType } from "../errors";
 import { colors, debug, error, log } from "../log";
+import { beginRequest, getRuntime, recordFallback, recordUpstreamError } from "../runtime";
 import {
   StreamTranslator,
   translateRequest,
@@ -22,8 +23,14 @@ export async function handleMessages(
 ): Promise<Response> {
   const startTime = performance.now();
   const requestId = `req_${uid()}`;
+  let releaseSlot: (() => void) | undefined;
+  let finishRequest: (() => void) | undefined;
 
   try {
+    if (!isAuthorized(req, config.proxyApiKey)) {
+      return anthropicError(401, "authentication_error", "Invalid proxy API key.");
+    }
+
     const bodyText = await readBodyLimited(req, config.maxBodyBytes);
     let body: AnthropicMessagesRequest;
     try {
@@ -38,6 +45,7 @@ export async function handleMessages(
 
     const originalModel = body.model || config.defaultModel;
     const isStream = body.stream === true;
+    finishRequest = beginRequest(isStream);
 
     log(
       `${cyan("→")} ${isStream ? "stream" : "  sync"} ${bold(originalModel)} ${dim(requestId)}`
@@ -49,6 +57,7 @@ export async function handleMessages(
       config.modelPrefix,
       config.defaultModel
     );
+    openaiBody.model = routeModel(openaiBody.model, body, config);
     debug("Translated OpenAI body", openaiBody);
 
     const apiKey = config.kiloApiKey || extractApiKey(req);
@@ -64,59 +73,133 @@ export async function handleMessages(
     const kiloUrl = `${config.kiloBaseUrl}/chat/completions`;
     debug(`Forwarding to: ${kiloUrl}`);
 
-    const controller = new AbortController();
-    const timer = setTimeout(
-      () => controller.abort(),
-      config.upstreamTimeoutMs
-    );
-
-    let kiloRes: Response;
-    try {
-      kiloRes = await fetch(kiloUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify(openaiBody),
-        signal: controller.signal,
-      });
-    } catch (err) {
-      clearTimeout(timer);
-      const msg = err instanceof Error ? err.message : String(err);
-      const isAbort =
-        (err instanceof Error && err.name === "AbortError") ||
-        /abort/i.test(msg);
-      error(
-        isAbort
-          ? `Upstream timeout after ${config.upstreamTimeoutMs}ms`
-          : `Upstream fetch failed: ${msg}`
-      );
-      return anthropicError(
-        isAbort ? 504 : 502,
-        "api_error",
-        isAbort
-          ? `Upstream timeout after ${config.upstreamTimeoutMs}ms`
-          : `Failed to reach upstream: ${msg}`
-      );
-    } finally {
-      clearTimeout(timer);
+    let controller!: AbortController;
+    let abortUpstream!: () => void;
+    const runtime = getRuntime(config);
+    releaseSlot = await runtime.limiter.acquire();
+    if (!releaseSlot) {
+      return anthropicError(429, "rate_limit_error", "Proxy is busy; try again shortly.");
     }
 
-    if (!kiloRes.ok) {
-      const errText = await kiloRes.text();
-      error(`Upstream ${kiloRes.status}: ${errText.slice(0, 200)}`);
-      return anthropicError(
-        kiloRes.status >= 400 && kiloRes.status < 600 ? kiloRes.status : 502,
-        mapUpstreamErrorType(kiloRes.status),
-        `Upstream returned ${kiloRes.status}: ${truncate(errText, 2000)}`
-      );
+    const allCandidates = [...new Set([openaiBody.model, ...config.fallbackModels])];
+    const candidateModels = allCandidates.filter((model) => !runtime.cooldowns.isCooling(model));
+    if (!candidateModels.length) candidateModels.push(...allCandidates);
+    let kiloRes: Response | undefined;
+
+    for (let attempt = 0; attempt < candidateModels.length; attempt++) {
+      const upstreamModel = candidateModels[attempt];
+      openaiBody.model = upstreamModel;
+      // Fresh controller per attempt so a prior timeout doesn't poison retries
+      controller = new AbortController();
+      abortUpstream = () => controller.abort("Client disconnected");
+      req.signal.addEventListener("abort", abortUpstream, { once: true });
+      const timer = setTimeout(() => controller.abort(), config.upstreamTimeoutMs);
+
+      try {
+        const response = await fetch(kiloUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${apiKey}`,
+          },
+          body: JSON.stringify(openaiBody),
+          signal: controller.signal,
+          // Needed only for networks that intercept HTTPS with a locally-issued
+          // certificate that is not in Bun's CA bundle.
+        tls: config.upstreamTlsRejectUnauthorized && !config.upstreamCaFile
+          ? undefined
+          : {
+              rejectUnauthorized: config.upstreamTlsRejectUnauthorized,
+              ...(config.upstreamCaFile ? { ca: [Bun.file(config.upstreamCaFile)] } : {}),
+            },
+        });
+
+        if (response.ok) {
+          kiloRes = response;
+          runtime.cooldowns.succeed(upstreamModel);
+          if (attempt > 0) {
+            recordFallback();
+            log(`${green("↳")} fallback ${dim(upstreamModel)} ${dim(requestId)}`);
+          }
+          break;
+        }
+
+        const errText = await response.text();
+        recordUpstreamError(response.status);
+        if (response.status === 429 || response.status >= 500) {
+          runtime.cooldowns.fail(upstreamModel);
+        }
+        if (canFallback(response.status, attempt, candidateModels.length)) {
+          log(
+            `${colors.yellow("↳")} upstream ${response.status} for ${dim(upstreamModel)}; ` +
+              `trying ${dim(candidateModels[attempt + 1])} ${dim(requestId)}`
+          );
+          req.signal.removeEventListener("abort", abortUpstream);
+          continue;
+        }
+
+        req.signal.removeEventListener("abort", abortUpstream);
+        error(`Upstream ${response.status}: ${errText.slice(0, 200)}`);
+        return anthropicError(
+          response.status >= 400 && response.status < 600 ? response.status : 502,
+          mapUpstreamErrorType(response.status),
+          `Upstream returned ${response.status}: ${truncate(errText, 2000)}`
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        const isAbort =
+          (err instanceof Error && err.name === "AbortError") || /abort/i.test(msg);
+        if (isAbort) {
+          req.signal.removeEventListener("abort", abortUpstream);
+          error(`Upstream timeout after ${config.upstreamTimeoutMs}ms`);
+          return anthropicError(
+            504,
+            "api_error",
+            `Upstream timeout after ${config.upstreamTimeoutMs}ms`
+          );
+        }
+
+        recordUpstreamError();
+        runtime.cooldowns.fail(upstreamModel);
+
+        if (attempt < candidateModels.length - 1) {
+          log(
+            `${colors.yellow("↳")} upstream connection failed for ${dim(upstreamModel)}; ` +
+              `trying ${dim(candidateModels[attempt + 1])} ${dim(requestId)}`
+          );
+          req.signal.removeEventListener("abort", abortUpstream);
+          continue;
+        }
+
+        req.signal.removeEventListener("abort", abortUpstream);
+        error(`Upstream fetch failed: ${msg}`);
+        return anthropicError(502, "api_error", `Failed to reach upstream: ${msg}`);
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+    if (!kiloRes) {
+      req.signal.removeEventListener("abort", abortUpstream);
+      return anthropicError(502, "api_error", "No upstream model was available.");
     }
 
     if (isStream) {
-      return handleStream(kiloRes, originalModel, startTime, requestId);
+      const streamRelease = releaseSlot;
+      const streamFinish = finishRequest;
+      releaseSlot = undefined;
+      finishRequest = undefined;
+      return handleStream(kiloRes, originalModel, startTime, requestId, controller, () => {
+        req.signal.removeEventListener("abort", abortUpstream);
+        streamRelease?.();
+        streamFinish?.();
+      });
     }
-    return handleSync(kiloRes, originalModel, startTime, requestId);
+    try {
+      return await handleSync(kiloRes, originalModel, startTime, requestId);
+    } finally {
+      req.signal.removeEventListener("abort", abortUpstream);
+    }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (msg === "BODY_TOO_LARGE") {
@@ -128,6 +211,9 @@ export async function handleMessages(
     }
     error(`Proxy error: ${msg}`);
     return anthropicError(500, "api_error", msg);
+  } finally {
+    releaseSlot?.();
+    finishRequest?.();
   }
 }
 
@@ -163,19 +249,24 @@ function handleStream(
   kiloRes: Response,
   model: string,
   startTime: number,
-  requestId: string
+  requestId: string,
+  upstreamController: AbortController,
+  cleanup: () => void
 ): Response {
   const translator = new StreamTranslator(model);
   const encoder = new TextEncoder();
 
+  // Bun's Response body reader has extra methods beyond the web-standard type.
+  let reader: any;
   const readable = new ReadableStream({
     async start(controller) {
-      const reader = kiloRes.body?.getReader();
+      reader = kiloRes.body?.getReader();
       if (!reader) {
         for (const ev of translator.finalize("stop")) {
           controller.enqueue(encoder.encode(ev));
         }
         controller.close();
+        cleanup();
         return;
       }
 
@@ -247,11 +338,21 @@ function handleStream(
         }
       } finally {
         try {
-          reader.releaseLock();
+          reader?.releaseLock();
         } catch {
           /* ignore */
         }
+        cleanup();
       }
+    },
+    async cancel() {
+      upstreamController.abort("Client stopped reading stream");
+      try {
+        await reader?.cancel();
+      } catch {
+        /* upstream is already closed */
+      }
+      cleanup();
     },
   });
 
@@ -264,6 +365,41 @@ function handleStream(
       "X-Accel-Buffering": "no",
     },
   });
+}
+
+/** When PROXY_API_KEY is unset the local proxy retains its existing behaviour. */
+function isAuthorized(req: Request, expectedKey: string): boolean {
+  if (!expectedKey) return true;
+  const supplied = req.headers.get("x-proxy-api-key") || extractApiKey(req);
+  if (supplied.length !== expectedKey.length) return false;
+  let mismatch = 0;
+  for (let i = 0; i < supplied.length; i++) mismatch |= supplied.charCodeAt(i) ^ expectedKey.charCodeAt(i);
+  return mismatch === 0;
+}
+
+function canFallback(status: number, attempt: number, totalAttempts: number): boolean {
+  return attempt < totalAttempts - 1 && (status === 408 || status === 429 || status >= 500);
+}
+
+function routeModel(
+  requestedModel: string,
+  body: AnthropicMessagesRequest,
+  config: Config
+): string {
+  const requested = requestedModel.toLowerCase();
+  if (!config.smartRouting || !requested.startsWith("claude-")) return requestedModel;
+  const hasImage = body.messages?.some((message) =>
+    Array.isArray(message.content) && message.content.some((block) => block.type === "image")
+  );
+  if (hasImage) return "nex-agi/nex-n2-pro:free";
+  const alias = config.modelAliases.find(({ pattern }) => globMatches(pattern, requested));
+  if (alias) return alias.model;
+  return requestedModel;
+}
+
+function globMatches(pattern: string, value: string): boolean {
+  const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
+  return new RegExp(`^${escaped}$`, "i").test(value);
 }
 
 async function readBodyLimited(req: Request, maxBytes: number): Promise<string> {
