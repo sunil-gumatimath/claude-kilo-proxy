@@ -58,6 +58,11 @@ export function translateRequest(
     openai.stream_options = { include_usage: true };
   }
 
+  if (body.thinking?.type === "enabled") {
+    const budget = body.thinking.budget_tokens ?? 0;
+    openai.reasoning_effort = budget >= 10_000 ? "high" : budget >= 4_000 ? "medium" : "low";
+  }
+
   if (body.tools?.length) {
     openai.tools = body.tools.map((t) => ({
       type: "function",
@@ -172,6 +177,21 @@ function translateUserMessage(
           image_url: { url: source.url },
         });
       }
+    } else if (block.type === "document" && "source" in block) {
+      const source = block.source as {
+        type?: string; media_type?: string; data?: string; content?: string;
+      };
+      const text = source?.content || (source?.type === "text" ? source.data : undefined);
+      if (text) {
+        contentParts.push({ type: "text", text: `[Document]\n${text}` });
+      } else if (source?.data && source?.media_type) {
+        // OpenAI-compatible gateways that understand input_file can forward PDFs
+        // and other encoded document attachments without losing the payload.
+        contentParts.push({
+          type: "file",
+          file: { file_data: `data:${source.media_type};base64,${source.data}`, mime_type: source.media_type },
+        });
+      }
     } else if (block.type === "tool_result" && "tool_use_id" in block) {
       if (contentParts.length) {
         result.push({
@@ -251,6 +271,10 @@ export function translateResponse(
     content.push({ type: "text", text: String(choice.message.content) });
   }
 
+  if (choice.message?.reasoning_content) {
+    content.unshift({ type: "thinking", thinking: String(choice.message.reasoning_content) });
+  }
+
   if (choice.message?.tool_calls) {
     for (const tc of choice.message.tool_calls) {
       let input: unknown = {};
@@ -293,11 +317,19 @@ export class StreamTranslator {
   private started = false;
   private textBlockActive = false;
   private textBlockIdx = -1;
+  private thinkingBlockActive = false;
+  private thinkingBlockIdx = -1;
   private nextBlockIdx = 0;
   /** OpenAI tool_call index → Anthropic content block index */
   private toolMap = new Map<
     number,
-    { blockIdx: number; id: string; name: string; pendingArgs: string }
+    {
+      blockIdx: number;
+      id: string;
+      name: string;
+      pendingArgs: string;
+      started: boolean;
+    }
   >();
   private inputTokens = 0;
   private outputTokens = 0;
@@ -330,6 +362,7 @@ export class StreamTranslator {
             id?: string;
             function?: { name?: string; arguments?: string };
           }>;
+          reasoning_content?: string | null;
         };
         finish_reason?: string | null;
       }>;
@@ -374,7 +407,32 @@ export class StreamTranslator {
 
     const delta = choice.delta || {};
 
+    if (delta.reasoning_content) {
+      if (!this.thinkingBlockActive) {
+        this.thinkingBlockIdx = this.nextBlockIdx++;
+        this.thinkingBlockActive = true;
+        events.push(
+          sse("content_block_start", {
+            type: "content_block_start",
+            index: this.thinkingBlockIdx,
+            content_block: { type: "thinking", thinking: "" },
+          })
+        );
+      }
+      events.push(
+        sse("content_block_delta", {
+          type: "content_block_delta",
+          index: this.thinkingBlockIdx,
+          delta: { type: "thinking_delta", thinking: delta.reasoning_content },
+        })
+      );
+    }
+
     if (delta.content != null && delta.content !== "") {
+      if (this.thinkingBlockActive) {
+        events.push(sse("content_block_stop", { type: "content_block_stop", index: this.thinkingBlockIdx }));
+        this.thinkingBlockActive = false;
+      }
       if (!this.textBlockActive) {
         this.textBlockIdx = this.nextBlockIdx++;
         this.textBlockActive = true;
@@ -396,6 +454,10 @@ export class StreamTranslator {
     }
 
     if (delta.tool_calls) {
+      if (this.thinkingBlockActive) {
+        events.push(sse("content_block_stop", { type: "content_block_stop", index: this.thinkingBlockIdx }));
+        this.thinkingBlockActive = false;
+      }
       if (this.textBlockActive) {
         events.push(
           sse("content_block_stop", {
@@ -410,41 +472,47 @@ export class StreamTranslator {
         const tcIdx = tc.index ?? 0;
         let entry = this.toolMap.get(tcIdx);
 
-        // Open block when we first see this index (id may arrive later)
+        // Open the Anthropic block only after we know its immutable metadata.
+        // Some OpenAI-compatible providers send argument fragments before id/name.
         if (!entry) {
-          const id = tc.id || `toolu_${uid()}`;
-          const name = tc.function?.name || "";
           const blockIdx = this.nextBlockIdx++;
-          entry = { blockIdx, id, name, pendingArgs: "" };
+          entry = {
+            blockIdx,
+            id: tc.id || "",
+            name: tc.function?.name || "",
+            pendingArgs: "",
+            started: false,
+          };
           this.toolMap.set(tcIdx, entry);
-          events.push(
-            sse("content_block_start", {
-              type: "content_block_start",
-              index: blockIdx,
-              content_block: {
-                type: "tool_use",
-                id,
-                name,
-                input: {},
-              },
-            })
-          );
         } else {
           if (tc.id) entry.id = tc.id;
           if (tc.function?.name) entry.name = tc.function.name;
         }
 
         if (tc.function?.arguments) {
+          entry.pendingArgs += tc.function.arguments;
+        }
+
+        if (!entry.started && entry.id && entry.name) {
+          entry.started = true;
+          events.push(
+            sse("content_block_start", {
+              type: "content_block_start",
+              index: entry.blockIdx,
+              content_block: { type: "tool_use", id: entry.id, name: entry.name, input: {} },
+            })
+          );
+        }
+
+        if (entry.started && entry.pendingArgs) {
           events.push(
             sse("content_block_delta", {
               type: "content_block_delta",
               index: entry.blockIdx,
-              delta: {
-                type: "input_json_delta",
-                partial_json: tc.function.arguments,
-              },
+              delta: { type: "input_json_delta", partial_json: entry.pendingArgs },
             })
           );
+          entry.pendingArgs = "";
         }
       }
     }
@@ -500,7 +568,39 @@ export class StreamTranslator {
       this.textBlockActive = false;
     }
 
+    if (this.thinkingBlockActive) {
+      events.push(
+        sse("content_block_stop", {
+          type: "content_block_stop",
+          index: this.thinkingBlockIdx,
+        })
+      );
+      this.thinkingBlockActive = false;
+    }
+
     for (const [, entry] of this.toolMap) {
+      // Upstream closed before sending metadata. Keep the Anthropic stream valid
+      // while making the malformed upstream response visible to the client.
+      if (!entry.started) {
+        entry.id ||= `toolu_${uid()}`;
+        entry.name ||= "unknown_tool";
+        events.push(
+          sse("content_block_start", {
+            type: "content_block_start",
+            index: entry.blockIdx,
+            content_block: { type: "tool_use", id: entry.id, name: entry.name, input: {} },
+          })
+        );
+        if (entry.pendingArgs) {
+          events.push(
+            sse("content_block_delta", {
+              type: "content_block_delta",
+              index: entry.blockIdx,
+              delta: { type: "input_json_delta", partial_json: entry.pendingArgs },
+            })
+          );
+        }
+      }
       events.push(
         sse("content_block_stop", {
           type: "content_block_stop",
