@@ -64,6 +64,7 @@ export interface AnthropicMessagesRequest {
   stream?: boolean;
   tools?: AnthropicTool[];
   tool_choice?: AnthropicToolChoice;
+  thinking?: { type: "enabled" | "disabled"; budget_tokens?: number };
   [key: string]: unknown;
 }
 
@@ -96,6 +97,8 @@ export interface OpenAIMessage {
   tool_calls?: OpenAIToolCall[];
   tool_call_id?: string;
   name?: string;
+  reasoning_content?: string | null;
+  annotations?: Array<unknown>;
 }
 
 export interface OpenAIChatRequest {
@@ -109,6 +112,7 @@ export interface OpenAIChatRequest {
   stream_options?: { include_usage?: boolean };
   tools?: unknown[];
   tool_choice?: unknown;
+  reasoning_effort?: "low" | "medium" | "high";
 }
 
 export interface OpenAIChoice {
@@ -123,6 +127,7 @@ export interface OpenAIChoice {
       function?: { name?: string; arguments?: string };
     }>;
     role?: string;
+    reasoning_content?: string | null;
   };
   finish_reason?: string | null;
 }
