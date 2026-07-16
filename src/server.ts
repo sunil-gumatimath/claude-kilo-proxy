@@ -6,6 +6,7 @@ import type { Config } from "./config";
 import { anthropicError } from "./errors";
 import { handleMessages } from "./handlers/messages";
 import { colors, banner, log, setDebug } from "./log";
+import { getMetrics, prometheusMetrics } from "./runtime";
 import { NAME, VERSION } from "./version";
 
 const { cyan, green, dim, bold, yellow } = colors;
@@ -25,7 +26,7 @@ export function createServer(config: Config) {
       if (req.method === "OPTIONS") {
         return new Response(null, {
           status: 204,
-          headers: corsHeaders(req),
+          headers: corsHeaders(req, config),
         });
       }
 
@@ -46,7 +47,7 @@ export function createServer(config: Config) {
           {
             headers: {
               "Cache-Control": "no-store",
-              ...corsHeaders(req),
+              ...corsHeaders(req, config),
             },
           }
         );
@@ -59,13 +60,55 @@ export function createServer(config: Config) {
         );
       }
 
+      if (req.method === "GET" && url.pathname === "/v1/models") {
+        const models = [...new Set([
+          ...config.fallbackModels,
+          ...config.modelAliases.map((alias) => alias.model),
+          "tencent/hy3:free",
+          "inclusionai/ling-2.6-flash:free",
+          "nex-agi/nex-n2-pro:free",
+          "poolside/laguna-m.1:free",
+        ])];
+        return Response.json(
+          {
+            object: "list",
+            data: models.map((id) => ({
+              id,
+              object: "model",
+              created: Math.floor(Date.now() / 1000),
+              owned_by: "kilo-proxy",
+            })),
+          },
+          { headers: { "Cache-Control": "no-store", ...corsHeaders(req, config) } }
+        );
+      }
+
+      if (req.method === "GET" && url.pathname === "/metrics") {
+        return new Response(prometheusMetrics(), {
+          headers: {
+            "Content-Type": "text/plain; version=0.0.4; charset=utf-8",
+            "Cache-Control": "no-store",
+          },
+        });
+      }
+
+      if (req.method === "GET" && url.pathname === "/dashboard") {
+        return new Response(dashboardHtml(), {
+          headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
+        });
+      }
+
+      if (req.method === "GET" && url.pathname === "/dashboard.json") {
+        return Response.json(getMetrics(), { headers: { "Cache-Control": "no-store" } });
+      }
+
       if (req.method === "POST" && url.pathname === "/v1/messages") {
         const res = await handleMessages(req, config);
         // Attach CORS on JSON errors / sync responses when Origin present
         const origin = req.headers.get("origin");
         if (origin && res.headers.get("content-type")?.includes("json")) {
           const headers = new Headers(res.headers);
-          for (const [k, v] of Object.entries(corsHeaders(req))) {
+          for (const [k, v] of Object.entries(corsHeaders(req, config))) {
             headers.set(k, v);
           }
           return new Response(res.body, {
@@ -96,10 +139,11 @@ export function createServer(config: Config) {
   return server;
 }
 
-function corsHeaders(req: Request): Record<string, string> {
+function corsHeaders(req: Request, config: Config): Record<string, string> {
   const origin = req.headers.get("origin");
-  // Local-dev friendly: reflect Origin only when present (not wide-open *)
-  if (!origin) return {};
+  // Browsers are opt-in. Do not reflect arbitrary origins when this process has
+  // access to a configured upstream key.
+  if (!origin || !config.corsAllowedOrigins.includes(origin)) return {};
   return {
     "Access-Control-Allow-Origin": origin,
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
@@ -137,6 +181,13 @@ function formatBytes(n: number): string {
   if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(0)}MB`;
   if (n >= 1024) return `${(n / 1024).toFixed(0)}KB`;
   return `${n}B`;
+}
+
+function dashboardHtml(): string {
+  return `<!doctype html><html><head><meta charset="utf-8"><title>Kilo Proxy</title>
+  <style>body{margin:40px;background:#101216;color:#eef2f7;font:16px system-ui;max-width:850px}h1{margin-bottom:4px}.muted{color:#9aa4b2}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:24px}.card{background:#191d24;border:1px solid #2b313c;border-radius:10px;padding:16px}.value{font-size:28px;font-weight:700;margin-top:8px}@media(max-width:600px){.grid{grid-template-columns:1fr}}</style>
+  </head><body><h1>⚡ Kilo Proxy</h1><p class="muted">Live runtime metrics · refreshes every 2 seconds</p><div id="grid" class="grid"></div>
+  <script>const labels={requestsTotal:'Requests',requestsActive:'Active requests',streamsActive:'Active streams',fallbacksTotal:'Fallbacks',upstreamErrorsTotal:'Upstream errors',rateLimitsTotal:'Rate limits',queuedRequests:'Queued requests'};async function load(){const m=await fetch('/dashboard.json').then(r=>r.json());document.querySelector('#grid').innerHTML=Object.entries(labels).map(([k,l])=>'<div class="card"><div class="muted">'+l+'</div><div class="value">'+m[k]+'</div></div>').join('')}load();setInterval(load,2000)</script></body></html>`;
 }
 
 function setupGracefulShutdown(server: ReturnType<typeof Bun.serve>) {
