@@ -62,12 +62,9 @@ export function createServer(config: Config) {
 
       if (req.method === "GET" && url.pathname === "/v1/models") {
         const models = [...new Set([
+          ...config.allowedModels,
           ...config.fallbackModels,
           ...config.modelAliases.map((alias) => alias.model),
-          "tencent/hy3:free",
-          "inclusionai/ling-2.6-flash:free",
-          "nex-agi/nex-n2-pro:free",
-          "poolside/laguna-m.1:free",
         ])];
         return Response.json(
           {
