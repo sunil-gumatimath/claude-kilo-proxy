@@ -73,7 +73,7 @@ export function createServer(config: Config) {
               id,
               object: "model",
               created: Math.floor(Date.now() / 1000),
-              owned_by: "kilo-proxy",
+              owned_by: "claude-code-proxy",
             })),
           },
           { headers: { "Cache-Control": "no-store", ...corsHeaders(req, config) } }
