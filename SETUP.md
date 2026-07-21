@@ -1,9 +1,9 @@
 # Setup Guide
 
-Step-by-step instructions to run **claude-kilo-proxy** and use **Kilo Code models inside Claude Code**.
+Step-by-step instructions to run **claude-code-proxy** and use **Kilo Code models inside Claude Code**.
 
 ```
-Claude Code  →  claude-kilo-proxy (localhost:4181)  →  Kilo Gateway
+Claude Code  →  claude-code-proxy (localhost:4181)  →  Kilo Gateway
 ```
 
 ---
@@ -44,8 +44,8 @@ bun --version
 ## 1. Get the project
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/claude-kilo-proxy.git
-cd claude-kilo-proxy
+git clone https://github.com/sunil-gumatimath/claude-code-proxy.git
+cd claude-code-proxy
 ```
 
 Or download the ZIP from GitHub and open that folder.
@@ -103,7 +103,7 @@ bun run dev
 You should see something like:
 
 ```
-  ⚡ claude-kilo-proxy v1.0.0
+  ⚡ claude-code-proxy v1.0.0
   Listen:  http://127.0.0.1:4181
   Ready → http://127.0.0.1:4181/v1/messages
 ```
@@ -207,18 +207,18 @@ If Claude errors immediately, check [Troubleshooting](#troubleshooting).
 ## Docker setup (optional)
 
 ```bash
-docker build -t claude-kilo-proxy .
+docker build -t claude-code-proxy .
 
 docker run --rm -p 4181:4181 \
   -e KILO_API_KEY=your-kilo-api-key \
-  claude-kilo-proxy
+  claude-code-proxy
 ```
 
 Windows PowerShell:
 
 ```powershell
-docker build -t claude-kilo-proxy .
-docker run --rm -p 4181:4181 -e KILO_API_KEY=your-kilo-api-key claude-kilo-proxy
+docker build -t claude-code-proxy .
+docker run --rm -p 4181:4181 -e KILO_API_KEY=your-kilo-api-key claude-code-proxy
 ```
 
 Then configure Claude Code the same way (`ANTHROPIC_BASE_URL=http://localhost:4181`).

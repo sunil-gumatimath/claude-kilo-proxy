@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for helping improve **claude-kilo-proxy**.
+Thanks for helping improve **claude-code-proxy**.
 
 ## Development
 

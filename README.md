@@ -1,4 +1,4 @@
-# ⚡ claude-kilo-proxy
+# ⚡ claude-code-proxy
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Bun](https://img.shields.io/badge/runtime-Bun-black)](https://bun.sh)
@@ -9,7 +9,7 @@
 Production-oriented local proxy that translates **Anthropic Messages API** ↔ **OpenAI Chat Completions** so Claude Code can use Kilo Gateway (or any OpenAI-compatible API).
 
 ```
-Claude Code CLI  ──(Anthropic format)──▶  claude-kilo-proxy  ──▶ Kilo Gateway
+Claude Code CLI  ──(Anthropic format)──▶  claude-code-proxy  ──▶ Kilo Gateway
                                                         └──▶ OpenCode Zen
                  ◀──(Anthropic format)──                 ◀──(OpenAI format)──
 ```
@@ -43,8 +43,8 @@ Claude Code CLI  ──(Anthropic format)──▶  claude-kilo-proxy  ──▶
 ### 1. Clone & configure
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/claude-kilo-proxy.git
-cd claude-kilo-proxy
+git clone https://github.com/sunil-gumatimath/claude-code-proxy.git
+cd claude-code-proxy
 cp .env.example .env
 # Edit .env and set your API keys for Kilo Code and OpenCode Zen:
 # KILO_API_KEY=your-kilo-key
@@ -90,29 +90,29 @@ key in `KILO_API_KEY`.
 
 | Env Variable | Default | Description |
 |---|---|---|
-| `KILO_API_KEY` | *(optional if sent on request)* | Kilo upstream API key |
+| `KILO_API_KEY` | *(optional if sent on request)* | Kilo upstream API key (`https://kilo.ai`) |
 | `OPENCODE_API_KEY` | *(optional)* | OpenCode Zen upstream API key; enables `opencode/*` models |
 | `OPENCODE_BASE_URL` | `https://opencode.ai/zen/v1` | OpenCode Zen API base URL |
-| `PROXY_API_KEY` | *(unset)* | Optional key required from proxy clients |
-| `KILO_BASE_URL` | `https://api.kilo.ai/api/gateway` | Upstream base URL |
+| `PROXY_API_KEY` | *(unset)* | Optional shared secret required from proxy clients |
+| `KILO_BASE_URL` | `https://api.kilo.ai/api/gateway` | Kilo upstream base URL |
 | `PROXY_HOST` | `127.0.0.1` | Bind address (localhost-only by default) |
 | `PROXY_PORT` | `4181` | Listen port |
-| `MODEL_PREFIX` | *(empty)* | Optional prefix added to model names |
-| `DEFAULT_MODEL` | `claude-sonnet-4-20250514` | Fallback when request omits `model` |
-| `FALLBACK_MODELS` | Provider-qualified Kilo/OpenCode models | Models tried after 429/5xx failures; e.g. `kilo/poolside/laguna-m.1:free,opencode/big-pickle` |
-| `MODEL_ALIASES` | Claude aliases to free Kilo models | Comma-separated `pattern=model` rules; `*` supported |
-| `FREE_MODELS_ONLY` | `true` | Reject paid models before they reach an upstream provider |
-| `ALLOWED_MODELS` | Built-in Kilo/OpenCode free allowlist | Comma-separated provider-qualified model IDs; use `opencode/deepseek-v4-flash-free` |
-| `SMART_ROUTING` | `true` | Routes Claude image requests to a vision-capable free model |
-| `MAX_CONCURRENT_REQUESTS` | `4` | Active upstream-generation limit |
-| `MAX_QUEUED_REQUESTS` | `20` | Requests waiting for an available generation slot |
-| `MODEL_COOLDOWN_MS` | `30000` | Temporarily avoid a model after a 429/5xx failure |
-| `UPSTREAM_TIMEOUT_MS` | `120000` | Upstream request timeout |
-| `UPSTREAM_TLS_REJECT_UNAUTHORIZED` | `true` | Verify the upstream TLS certificate |
-| `UPSTREAM_CA_FILE` | *(unset)* | PEM CA to trust for the upstream connection |
-| `MAX_BODY_BYTES` | `20971520` (20MB) | Max request body size |
-| `DEBUG` | `false` | Verbose logging (redacted) |
-| `CORS_ALLOWED_ORIGINS` | *(unset)* | Comma-separated browser origins; disabled by default |
+| `MODEL_PREFIX` | *(empty)* | Optional prefix added to model names for Kilo Gateway |
+| `DEFAULT_MODEL` | `claude-sonnet-4-20250514` | Fallback when client request omits `model` |
+| `FALLBACK_MODELS` | Provider-qualified models | Models tried after 429/5xx failures (`kilo/*` and `opencode/*`) |
+| `MODEL_ALIASES` | Sonnet $\rightarrow$ DeepSeek Flash | Wildcard rules (`*sonnet*=opencode/deepseek-v4-flash-free`) |
+| `FREE_MODELS_ONLY` | `true` | Reject paid models before reaching upstream providers |
+| `ALLOWED_MODELS` | Built-in free allowlist | Permitted provider-qualified models (Kilo & OpenCode) |
+| `SMART_ROUTING` | `true` | Automatically routes Claude image requests to vision-capable models |
+| `MAX_CONCURRENT_REQUESTS` | `4` | Active upstream generation limit |
+| `MAX_QUEUED_REQUESTS` | `20` | Max requests waiting for a generation slot |
+| `MODEL_COOLDOWN_MS` | `30000` | Cooldown duration for a model after 429/5xx failures |
+| `UPSTREAM_TIMEOUT_MS` | `120000` | Upstream fetch timeout (ms) |
+| `UPSTREAM_TLS_REJECT_UNAUTHORIZED` | `true` | Verify upstream TLS certificate |
+| `UPSTREAM_CA_FILE` | *(unset)* | Custom PEM CA file to trust for upstream connections |
+| `MAX_BODY_BYTES` | `20971520` (20MB) | Max request body size in bytes |
+| `DEBUG` | `false` | Verbose debug logging (with key & payload redaction) |
+| `CORS_ALLOWED_ORIGINS` | *(unset)* | Comma-separated browser origins (disabled by default) |
 
 ## Project structure
 
@@ -137,10 +137,10 @@ Dockerfile
 ## Docker
 
 ```bash
-docker build -t claude-kilo-proxy .
+docker build -t claude-code-proxy .
 docker run --rm -p 4181:4181 \
   -e KILO_API_KEY=your-key \
-  claude-kilo-proxy
+  claude-code-proxy
 ```
 
 > Container sets `PROXY_HOST=0.0.0.0` so port publishing works. Keep the host firewall tight.
