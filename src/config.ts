@@ -25,12 +25,18 @@ export interface Config {
   host: string;
   port: number;
   kiloApiKey: string;
+  opencodeApiKey: string;
+  opencodeBaseUrl: string;
   /** Optional shared secret required from clients before requests are forwarded. */
   proxyApiKey: string;
   kiloBaseUrl: string;
   modelPrefix: string;
   defaultModel: string;
   fallbackModels: string[];
+  /** Provider-qualified models that may be used by this proxy. Empty permits all free models. */
+  allowedModels: string[];
+  /** Reject paid and unapproved models instead of forwarding them upstream. */
+  freeModelsOnly: boolean;
   modelAliases: Array<{ pattern: string; model: string }>;
   smartRouting: boolean;
   maxConcurrentRequests: number;
@@ -53,6 +59,11 @@ export function loadConfig(): Config {
     host: envStr("PROXY_HOST", "127.0.0.1"),
     port: envInt("PROXY_PORT", 4181),
     kiloApiKey: envStr("KILO_API_KEY", ""),
+    opencodeApiKey: envStr("OPENCODE_API_KEY", ""),
+    opencodeBaseUrl: envStr(
+      "OPENCODE_BASE_URL",
+      "https://opencode.ai/zen/v1"
+    ).replace(/\/+$/, ""),
     proxyApiKey: envStr("PROXY_API_KEY", ""),
     kiloBaseUrl: envStr(
       "KILO_BASE_URL",
@@ -62,13 +73,17 @@ export function loadConfig(): Config {
     modelPrefix: Bun.env.MODEL_PREFIX ?? "",
     defaultModel: envStr("DEFAULT_MODEL", "claude-sonnet-4-20250514"),
     fallbackModels: (Bun.env.FALLBACK_MODELS ??
-      "nex-agi/nex-n2-pro:free,poolside/laguna-m.1:free")
+      "kilo/poolside/laguna-m.1:free,kilo/cohere/north-mini-code:free,kilo/stepfun/step-3.7-flash:free,opencode/big-pickle,opencode/deepseek-v4-flash-free")
       .split(",")
       .map((model) => model.trim())
       .filter(Boolean),
+    allowedModels: (Bun.env.ALLOWED_MODELS ??
+      "opencode/deepseek-v4-flash-free,opencode/big-pickle,opencode/mimo-v2.5-free,opencode/north-mini-code-free,opencode/nemotron-3-ultra-free,kilo/stepfun/step-3.7-flash:free,kilo/poolside/laguna-m.1:free,kilo/cohere/north-mini-code:free")
+      .split(",").map((model) => model.trim()).filter(Boolean),
+    freeModelsOnly: envBool("FREE_MODELS_ONLY", true),
     modelAliases: parseAliases(
       Bun.env.MODEL_ALIASES ??
-        "*haiku*=inclusionai/ling-2.6-flash:free,*sonnet*=tencent/hy3:free,*opus*=poolside/laguna-m.1:free"
+        "*haiku*=kilo/stepfun/step-3.7-flash:free,*sonnet*=opencode/deepseek-v4-flash-free,*opus*=kilo/poolside/laguna-m.1:free"
     ),
     smartRouting: envBool("SMART_ROUTING", true),
     maxConcurrentRequests: envInt("MAX_CONCURRENT_REQUESTS", 4),
