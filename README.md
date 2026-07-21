@@ -4,35 +4,37 @@
 [![Bun](https://img.shields.io/badge/runtime-Bun-black)](https://bun.sh)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](./CONTRIBUTING.md)
 
-**Use [Kilo Code](https://kilo.ai) models with [Claude Code](https://docs.anthropic.com/en/docs/claude-code).**
+**Use [Kilo Code](https://kilo.ai) and [OpenCode Zen](https://opencode.ai/docs/zen/) models with [Claude Code](https://docs.anthropic.com/en/docs/claude-code).**
 
 Production-oriented local proxy that translates **Anthropic Messages API** ↔ **OpenAI Chat Completions** so Claude Code can use Kilo Gateway (or any OpenAI-compatible API).
 
 ```
-Claude Code CLI  ──(Anthropic format)──▶  claude-kilo-proxy  ──(OpenAI format)──▶  Kilo Gateway
-                 ◀──(Anthropic format)──                      ◀──(OpenAI format)──
+Claude Code CLI  ──(Anthropic format)──▶  claude-kilo-proxy  ──▶ Kilo Gateway
+                                                        └──▶ OpenCode Zen
+                 ◀──(Anthropic format)──                 ◀──(OpenAI format)──
 ```
 
 > **Disclaimer:** Unofficial community project. Not affiliated with, endorsed by, or sponsored by Anthropic or Kilo. APIs may change; use at your own risk.
 
 ## Features
 
+- **Dual-Provider Routing**: Seamlessly route to both **Kilo Code** (`kilo/*`) and **OpenCode Zen** (`opencode/*`) models in a unified fallback chain
 - Full request/response translation (Anthropic ↔ OpenAI)
 - Streaming (SSE) with reliable stream finalization
 - Tool use / function calling (including multi-turn tool results)
-- Image content support
+- Image content support & automated smart vision routing
 - Upstream timeouts, body size limits, request IDs
 - Localhost-only bind by default
 - Graceful shutdown (SIGINT / SIGTERM)
 - Debug logging with secret/base64 redaction
 - Zero runtime npm dependencies — [Bun](https://bun.sh) only
 - Docker image included
-- Unit tests for the translator
+- Comprehensive unit tests
 
 ## Requirements
 
 - [Bun](https://bun.sh) ≥ 1.0
-- A [Kilo](https://kilo.ai) API key (or another OpenAI-compatible endpoint)
+- A [Kilo](https://kilo.ai) API key and/or an [OpenCode Zen](https://opencode.ai/docs/zen/) API key
 
 > **Full walkthrough:** see **[SETUP.md](./SETUP.md)** (install Bun, `.env`, Claude Code env vars, Docker, troubleshooting).
 
@@ -44,7 +46,9 @@ Claude Code CLI  ──(Anthropic format)──▶  claude-kilo-proxy  ──(Op
 git clone https://github.com/YOUR_USERNAME/claude-kilo-proxy.git
 cd claude-kilo-proxy
 cp .env.example .env
-# Edit .env and set KILO_API_KEY
+# Edit .env and set your API keys for Kilo Code and OpenCode Zen:
+# KILO_API_KEY=your-kilo-key
+# OPENCODE_API_KEY=your-opencode-key
 ```
 
 ### 2. Start the proxy
@@ -86,15 +90,19 @@ key in `KILO_API_KEY`.
 
 | Env Variable | Default | Description |
 |---|---|---|
-| `KILO_API_KEY` | *(optional if sent on request)* | Upstream API key |
+| `KILO_API_KEY` | *(optional if sent on request)* | Kilo upstream API key |
+| `OPENCODE_API_KEY` | *(optional)* | OpenCode Zen upstream API key; enables `opencode/*` models |
+| `OPENCODE_BASE_URL` | `https://opencode.ai/zen/v1` | OpenCode Zen API base URL |
 | `PROXY_API_KEY` | *(unset)* | Optional key required from proxy clients |
 | `KILO_BASE_URL` | `https://api.kilo.ai/api/gateway` | Upstream base URL |
 | `PROXY_HOST` | `127.0.0.1` | Bind address (localhost-only by default) |
 | `PROXY_PORT` | `4181` | Listen port |
 | `MODEL_PREFIX` | *(empty)* | Optional prefix added to model names |
 | `DEFAULT_MODEL` | `claude-sonnet-4-20250514` | Fallback when request omits `model` |
-| `FALLBACK_MODELS` | `nex-agi/nex-n2-pro:free,poolside/laguna-m.1:free` | Models tried after 429/5xx failures |
+| `FALLBACK_MODELS` | Provider-qualified Kilo/OpenCode models | Models tried after 429/5xx failures; e.g. `kilo/poolside/laguna-m.1:free,opencode/big-pickle` |
 | `MODEL_ALIASES` | Claude aliases to free Kilo models | Comma-separated `pattern=model` rules; `*` supported |
+| `FREE_MODELS_ONLY` | `true` | Reject paid models before they reach an upstream provider |
+| `ALLOWED_MODELS` | Built-in Kilo/OpenCode free allowlist | Comma-separated provider-qualified model IDs; use `opencode/deepseek-v4-flash-free` |
 | `SMART_ROUTING` | `true` | Routes Claude image requests to a vision-capable free model |
 | `MAX_CONCURRENT_REQUESTS` | `4` | Active upstream-generation limit |
 | `MAX_QUEUED_REQUESTS` | `20` | Requests waiting for an available generation slot |
@@ -176,6 +184,12 @@ bun run dev          # hot reload
 - `tools[].input_schema` → `tools[].function.parameters`
 - `thinking.budget_tokens` → `reasoning_effort` (high/medium/low)
 - Model prefixed for gateway routing
+
+### Dual-Provider & Free-model policy
+
+Models are provider-qualified: `opencode/deepseek-v4-flash-free` (OpenCode Zen) and `kilo/stepfun/step-3.7-flash:free` (Kilo Gateway). The proxy supports simultaneous authentication to both providers by supplying `KILO_API_KEY` and `OPENCODE_API_KEY` in `.env`.
+
+Requests dynamically evaluate and iterate through candidate targets across both providers in a unified fallback chain if an upstream model encounters rate limits (429) or temporary errors. Tool and image requests are filtered against known model capabilities; image inputs automatically trigger vision-capable fallbacks such as `kilo/stepfun/step-3.7-flash:free`.
 
 ### Streaming (OpenAI → Anthropic SSE)
 
